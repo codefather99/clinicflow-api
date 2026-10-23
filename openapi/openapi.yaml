@@ -1,0 +1,871 @@
+openapi: 3.0.3
+info:
+  title: ClinicFlow API
+  version: 0.1.0
+  description: |
+    Appointments and queue for ONE demonstration clinic. Fictional data only. Holds no clinical information.
+
+    **Conventions (apply to every operation)**
+    - Base paths all start with `/api/v1`. JSON everywhere except the SSE stream.
+    - Times are ISO-8601 with offset (`2026-10-26T09:00:00+01:00`). `date` values are the clinic's calendar date in Africa/Lagos (`2026-10-26`).
+    - Every request SHOULD send `X-Request-Id` (UUID). The service echoes it on every response, including errors, and logs it.
+    - Every error is `application/problem+json` shaped as `Problem`. The interface switches on `code`, never on `detail` text.
+    - Unsafe writes that create things (`POST /patient/appointments`, `POST /walk-ins`) REQUIRE an `Idempotency-Key` header. Generate ONE key per form submission (when the form mounts or on first click) and reuse it on every retry of that submission. A new key means a new booking.
+    - Staff endpoints need `Authorization: Bearer <jwt>` from `/auth/login`. Patient endpoints are anonymous.
+    - Each operation carries `x-semantics` stating whether it is safe and/or idempotent.
+    - Queue position is DERIVED, 1 = next to be seen. Any wait time is an ESTIMATE and always carries its `basis` text, which the screen must show.
+
+    **Mock server:** `npx @stoplight/prism-cli mock openapi/openapi.yaml -p 4010`. Use header `Prefer: code=409` or `Prefer: example=slotTaken` to force error states.
+  contact:
+    name: Henry Emefo (API) / Ayodeji Oni (Data and rules) / Ehimare J. Okosun (Interface)
+servers:
+  - url: http://localhost:8080
+    description: Local service
+  - url: http://localhost:4010
+    description: Prism mock
+  - url: https://REPLACE-ME.onrender.com
+    description: Deployed service (fill in on day one)
+tags:
+  - name: Meta
+  - name: Patient
+    description: Anonymous. A patient can only ever see their own booking.
+  - name: Auth
+  - name: Reception
+    description: Staff only (RECEPTIONIST or ADMIN) unless stated.
+  - name: Demo
+
+paths:
+  /api/v1/meta:
+    get:
+      tags: [Meta]
+      operationId: getMeta
+      summary: Clinic name, demo-mode flag and server time
+      x-semantics: safe, idempotent
+      security: []
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Meta' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/visit-types:
+    get:
+      tags: [Meta]
+      operationId: listVisitTypes
+      summary: Visit types a patient can choose
+      x-semantics: safe, idempotent
+      security: []
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VisitType' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/slots:
+    get:
+      tags: [Patient]
+      operationId: listSlots
+      summary: Slots for a date, each marked available or taken
+      description: Never reveals who holds a taken slot. Slots in the past are omitted.
+      x-semantics: safe, idempotent
+      security: []
+      parameters:
+        - name: date
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: '2026-10-26'
+      responses:
+        '200':
+          description: OK (empty array = clinic closed or no slots that day)
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Slot' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/patient/appointments:
+    post:
+      tags: [Patient]
+      operationId: createAppointment
+      summary: Book a slot
+      description: |
+        Returns a reference and a one-time `manageToken` (shown once; the service stores only its hash).
+        If two people book the same slot at the same instant, exactly one gets 201 and the other gets 409 `SLOT_TAKEN`
+        with `suggestedSlots` so the screen can offer alternatives instead of a dead end.
+      x-semantics: unsafe, idempotent via Idempotency-Key (same key + same body returns the original 201 again)
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BookingRequest' }
+      responses:
+        '201':
+          description: Booked
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookingCreated' }
+        '409': { $ref: '#/components/responses/SlotConflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/patient/appointments/{reference}:
+    get:
+      tags: [Patient]
+      operationId: getPatientAppointment
+      summary: Look up my booking and current queue position
+      description: Read-only. Returns only this patient's own data. Never any other patient's name or contact.
+      x-semantics: safe, idempotent
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/Reference' }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PatientAppointment' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/patient/appointments/{reference}/events:
+    get:
+      tags: [Patient]
+      operationId: streamPatientAppointment
+      summary: Live position updates (Server-Sent Events)
+      description: |
+        Use `new EventSource(url)`. The service sends an event named `appointment` whose `data` is a full
+        `PatientAppointment` JSON, once immediately on connect and again every time the position or status changes.
+        A comment line `: keep-alive` is sent about every 25 seconds. If the stream drops, the browser reconnects
+        automatically; the interface must ALSO fall back to polling `getPatientAppointment` every 10 seconds
+        while disconnected and show "Reconnecting..." so the screen is never silently stale.
+      x-semantics: safe, idempotent
+      security: []
+      parameters:
+        - { $ref: '#/components/parameters/Reference' }
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+              example: "event: appointment\ndata: {\"reference\":\"CF-7K3Q-9XMD\",\"status\":\"WAITING\",\"queuePosition\":2}\n\n"
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/patient/appointments/{reference}/cancellation:
+    post:
+      tags: [Patient]
+      operationId: cancelPatientAppointment
+      summary: Cancel my booking (only while status is BOOKED)
+      description: Once the patient has been checked in, only staff can cancel (409 `INVALID_TRANSITION`). Requires the manage token.
+      x-semantics: unsafe, idempotent (cancelling an already-cancelled booking returns 200 with the same body)
+      security: [{ manageToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Reference' }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 200 }
+      responses:
+        '200':
+          description: Cancelled
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PatientAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/patient/appointments/{reference}/slot:
+    put:
+      tags: [Patient]
+      operationId: reschedulePatientAppointment
+      summary: Move my booking to another slot (only while status is BOOKED)
+      description: Atomic. The old slot is freed and the new one taken in one transaction, or neither changes. 409 `SLOT_TAKEN` if the new slot was just taken.
+      x-semantics: unsafe, idempotent (same slotId twice leaves the same result)
+      security: [{ manageToken: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/Reference' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId]
+              properties:
+                slotId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rescheduled
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PatientAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/SlotConflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Staff login
+      x-semantics: unsafe, not idempotent
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Who am I (also used to detect an expired token)
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffUser' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/v1/appointments:
+    get:
+      tags: [Reception]
+      operationId: listAppointments
+      summary: Day's appointments with search and filters
+      description: Filters combine (AND). Omit a filter to clear it. Ordered by slot time, walk-ins by arrival time.
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+        - name: status
+          in: query
+          required: false
+          description: Comma-separated, e.g. `WAITING,BOOKED`
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/Status' }
+        - { name: q, in: query, required: false, description: Patient name contains (case-insensitive) or exact reference, schema: { type: string, maxLength: 120 } }
+        - { name: page, in: query, required: false, schema: { type: integer, minimum: 0, default: 0 } }
+        - { name: size, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: OK (items empty = the "nothing matches" state)
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppointmentPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/appointments/{id}:
+    get:
+      tags: [Reception]
+      operationId: getAppointment
+      summary: Appointment detail
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AppointmentId' }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/appointments/{id}/status:
+    put:
+      tags: [Reception]
+      operationId: setAppointmentStatus
+      summary: Move an appointment along the sequence (check in, start, complete, cancel)
+      description: |
+        Allowed transitions: BOOKED->WAITING (check in), BOOKED->CANCELLED, WAITING->IN_CONSULTATION,
+        WAITING->CANCELLED, IN_CONSULTATION->COMPLETED. Anything else is 409 `INVALID_TRANSITION`.
+        `expectedStatus` is what the screen believed the status was. If someone else already changed it,
+        409 `STALE_STATE` returns the true appointment in `current` so the screen can correct itself.
+        Cancelling a WAITING patient closes the gap: everyone behind moves up one position.
+        Setting the status the appointment already has (with matching expectedStatus) is a no-op returning 200.
+      x-semantics: unsafe, idempotent (same target twice = same result)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AppointmentId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StatusChangeRequest' }
+      responses:
+        '200':
+          description: Changed
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InvalidTransition' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/appointments/{id}/slot:
+    put:
+      tags: [Reception]
+      operationId: rescheduleAppointment
+      summary: Reception reschedules a BOOKED appointment
+      x-semantics: unsafe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AppointmentId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId]
+              properties:
+                slotId: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rescheduled
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/SlotConflict' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/appointments/{id}/activity:
+    get:
+      tags: [Reception]
+      operationId: listAppointmentActivity
+      summary: History of one appointment, oldest first
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/AppointmentId' }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ActivityEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/walk-ins:
+    post:
+      tags: [Reception]
+      operationId: admitWalkIn
+      summary: Admit a walk-in straight into the queue
+      description: Creates an appointment with no slot, status WAITING. `aheadOfQueue=true` puts them at the front of the waiting list (behind anyone already in consultation).
+      x-semantics: unsafe, idempotent via Idempotency-Key
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WalkInRequest' }
+      responses:
+        '201':
+          description: Admitted
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StaffAppointment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/ClinicClosed' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/queue:
+    get:
+      tags: [Reception]
+      operationId: getQueue
+      summary: Today's live queue in order
+      description: '`inConsultation` first, then `waiting` ordered by position (1 = next). `generatedAt` tells the screen how fresh this is.'
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QueueView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/dashboard:
+    get:
+      tags: [Reception]
+      operationId: getDashboard
+      summary: Counts for a day, computed from the records at request time
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: date, in: query, required: true, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Dashboard' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/activity:
+    get:
+      tags: [Reception]
+      operationId: listRecentActivity
+      summary: Recent activity across the clinic, newest first
+      x-semantics: safe, idempotent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: OK
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ActivityEntry' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/demo/reset:
+    post:
+      tags: [Demo]
+      operationId: resetDemoDay
+      summary: DEMO ONLY. Rebuild today's clinic day from seed data
+      description: ADMIN only. Exists so reception can run a full day from a clean start without editing data by hand. The interface must label it as demonstration mode.
+      x-semantics: unsafe, idempotent (result is always the same seeded day)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204':
+          description: Reset done
+          headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    manageToken:
+      type: apiKey
+      in: header
+      name: X-Manage-Token
+      description: One-time token returned when the booking was created. Lets a patient cancel or reschedule their own BOOKED appointment.
+
+  headers:
+    XRequestId:
+      description: Echo of the request's X-Request-Id (generated by the service if the client sent none).
+      schema: { type: string, maxLength: 64 }
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Client-generated UUID, one per form submission, reused on retries.
+      schema: { type: string, minLength: 8, maxLength: 64 }
+      example: 5b0f0a52-4c43-4c6e-9d83-3f2a9b1a7c11
+    Reference:
+      name: reference
+      in: path
+      required: true
+      schema: { type: string, pattern: '^CF-[A-Z0-9]{4}-[A-Z0-9]{4}$' }
+      example: CF-7K3Q-9XMD
+    AppointmentId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  schemas:
+    Status:
+      type: string
+      enum: [BOOKED, WAITING, IN_CONSULTATION, COMPLETED, CANCELLED]
+      description: BOOKED = has a slot, not arrived. WAITING = checked in, in the queue.
+
+    Meta:
+      type: object
+      required: [clinicName, demoMode, serverTime, timezone, version]
+      properties:
+        clinicName: { type: string, example: Demo Community Clinic (fictional) }
+        demoMode: { type: boolean, description: 'Always true. Show a visible "Demonstration data" banner.' }
+        serverTime: { type: string, format: date-time }
+        timezone: { type: string, example: Africa/Lagos }
+        version: { type: string, example: 0.1.0 }
+
+    VisitType:
+      type: object
+      required: [id, code, label, durationMinutes]
+      properties:
+        id: { type: integer }
+        code: { type: string, example: GENERAL }
+        label: { type: string, example: General consultation }
+        durationMinutes: { type: integer, minimum: 1, description: Minutes }
+
+    Slot:
+      type: object
+      required: [id, startsAt, endsAt, available]
+      properties:
+        id: { type: string, format: uuid }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        available: { type: boolean }
+
+    SlotWindow:
+      type: object
+      required: [startsAt, endsAt]
+      nullable: true
+      properties:
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+
+    BookingRequest:
+      type: object
+      required: [patientName, contact, visitTypeCode, slotId]
+      properties:
+        patientName: { type: string, minLength: 2, maxLength: 120, description: Fictional name only }
+        contact: { type: string, minLength: 3, maxLength: 60, description: Fictional placeholder. Label it as such on the form. }
+        visitTypeCode: { type: string, example: GENERAL }
+        slotId: { type: string, format: uuid }
+
+    Estimate:
+      type: object
+      nullable: true
+      required: [minutes, isEstimate, basis]
+      properties:
+        minutes: { type: integer, minimum: 0, description: Minutes }
+        isEstimate: { type: boolean, enum: [true] }
+        basis: { type: string, example: 'About 15 min per person ahead, from today''s average completed consultation' }
+
+    PatientAppointment:
+      type: object
+      description: What a patient may see. Contains no other patient's data and no contact field.
+      required: [reference, patientName, visitType, slot, status, queuePosition, peopleAhead, estimate, canCancel, canReschedule, updatedAt]
+      properties:
+        reference: { type: string, example: CF-7K3Q-9XMD }
+        patientName: { type: string }
+        visitType: { $ref: '#/components/schemas/VisitType' }
+        slot: { $ref: '#/components/schemas/SlotWindow' }
+        status: { $ref: '#/components/schemas/Status' }
+        queuePosition: { type: integer, minimum: 1, nullable: true, description: 'Non-null only while WAITING. 1 = next.' }
+        peopleAhead: { type: integer, minimum: 0, nullable: true, description: 'Non-null only while WAITING. Equals queuePosition - 1.' }
+        estimate: { $ref: '#/components/schemas/Estimate' }
+        canCancel: { type: boolean, description: True only while BOOKED }
+        canReschedule: { type: boolean, description: True only while BOOKED }
+        updatedAt: { type: string, format: date-time }
+
+    BookingCreated:
+      type: object
+      required: [appointment, manageToken]
+      properties:
+        appointment: { $ref: '#/components/schemas/PatientAppointment' }
+        manageToken: { type: string, description: 'Shown once. Tell the patient to keep it with their reference.' }
+
+    StaffAppointment:
+      type: object
+      required: [id, reference, patientName, contact, visitType, slot, isWalkIn, status, queuePosition, version, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        reference: { type: string }
+        patientName: { type: string }
+        contact: { type: string }
+        visitType: { $ref: '#/components/schemas/VisitType' }
+        slot: { $ref: '#/components/schemas/SlotWindow' }
+        isWalkIn: { type: boolean }
+        status: { $ref: '#/components/schemas/Status' }
+        queuePosition: { type: integer, minimum: 1, nullable: true }
+        checkedInAt: { type: string, format: date-time, nullable: true }
+        consultationStartedAt: { type: string, format: date-time, nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        cancelledAt: { type: string, format: date-time, nullable: true }
+        cancelReason: { type: string, nullable: true }
+        version: { type: integer, minimum: 0 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AppointmentPage:
+      type: object
+      required: [items, page, size, totalItems]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/StaffAppointment' }
+        page: { type: integer }
+        size: { type: integer }
+        totalItems: { type: integer, format: int64 }
+
+    StatusChangeRequest:
+      type: object
+      required: [status, expectedStatus]
+      properties:
+        status: { $ref: '#/components/schemas/Status' }
+        expectedStatus: { $ref: '#/components/schemas/Status' }
+        reason: { type: string, maxLength: 200, description: Used when status is CANCELLED }
+
+    WalkInRequest:
+      type: object
+      required: [patientName, contact, visitTypeCode, aheadOfQueue]
+      properties:
+        patientName: { type: string, minLength: 2, maxLength: 120 }
+        contact: { type: string, minLength: 3, maxLength: 60 }
+        visitTypeCode: { type: string }
+        aheadOfQueue: { type: boolean }
+
+    QueueView:
+      type: object
+      required: [date, inConsultation, waiting, generatedAt]
+      properties:
+        date: { type: string, format: date }
+        inConsultation:
+          type: array
+          items: { $ref: '#/components/schemas/StaffAppointment' }
+        waiting:
+          type: array
+          description: Ordered by position, 1 first
+          items: { $ref: '#/components/schemas/StaffAppointment' }
+        generatedAt: { type: string, format: date-time }
+
+    Dashboard:
+      type: object
+      description: All counts are computed from the records when requested. None are stored.
+      required: [date, appointmentsTotal, booked, waiting, inConsultation, completed, cancelled, walkIns, generatedAt]
+      properties:
+        date: { type: string, format: date }
+        appointmentsTotal: { type: integer }
+        booked: { type: integer }
+        waiting: { type: integer }
+        inConsultation: { type: integer }
+        completed: { type: integer }
+        cancelled: { type: integer }
+        walkIns: { type: integer }
+        generatedAt: { type: string, format: date-time }
+
+    ActivityEntry:
+      type: object
+      required: [id, appointmentId, reference, eventType, toStatus, actor, actorRole, occurredAt]
+      properties:
+        id: { type: integer, format: int64 }
+        appointmentId: { type: string, format: uuid }
+        reference: { type: string }
+        eventType: { type: string, enum: [BOOKED, CHECKED_IN, CONSULTATION_STARTED, COMPLETED, CANCELLED, RESCHEDULED, WALK_IN_ADMITTED] }
+        fromStatus: { $ref: '#/components/schemas/Status' }
+        toStatus: { $ref: '#/components/schemas/Status' }
+        actor: { type: string, example: Grace (reception) }
+        actorRole: { type: string, enum: [PATIENT, RECEPTIONIST, ADMIN, SYSTEM] }
+        occurredAt: { type: string, format: date-time }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 1, maxLength: 100 }
+
+    StaffUser:
+      type: object
+      required: [id, displayName, role]
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        role: { type: string, enum: [RECEPTIONIST, ADMIN] }
+
+    LoginResponse:
+      type: object
+      required: [accessToken, tokenType, expiresInSeconds, user]
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, enum: [Bearer] }
+        expiresInSeconds: { type: integer, description: Seconds }
+        user: { $ref: '#/components/schemas/StaffUser' }
+
+    FieldError:
+      type: object
+      required: [field, message]
+      properties:
+        field: { type: string, example: patientName }
+        message: { type: string, example: Name must be at least 2 characters }
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details plus ClinicFlow extensions. Switch on `code`.
+      required: [title, status, code, requestId]
+      properties:
+        type: { type: string, example: 'about:blank' }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string, description: Human readable. Safe to show to the user. }
+        code:
+          type: string
+          enum: [VALIDATION_FAILED, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, SLOT_TAKEN, SLOT_IN_PAST, INVALID_TRANSITION, STALE_STATE, CLINIC_CLOSED, IDEMPOTENCY_KEY_MISMATCH, IDEMPOTENCY_IN_PROGRESS, RATE_LIMITED, INTERNAL_ERROR]
+        requestId: { type: string }
+        fieldErrors:
+          type: array
+          items: { $ref: '#/components/schemas/FieldError' }
+        suggestedSlots:
+          type: array
+          description: Present on SLOT_TAKEN. Up to 3 nearest free slots the same day.
+          items: { $ref: '#/components/schemas/Slot' }
+        current:
+          description: Present on STALE_STATE and INVALID_TRANSITION. The appointment's true current state.
+          allOf:
+            - { $ref: '#/components/schemas/StaffAppointment' }
+
+  responses:
+    ValidationFailed:
+      description: Input failed validation (empty or malformed field, past slot, unknown visit type)
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example:
+            title: Validation failed
+            status: 422
+            code: VALIDATION_FAILED
+            requestId: 0f9c2d0a-1111-4b6e-9a0b-6f3c1b2d7a10
+            fieldErrors:
+              - { field: patientName, message: Name must be at least 2 characters }
+    Unauthorized:
+      description: Missing, expired or wrong credentials (or wrong manage token)
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Not signed in, status: 401, code: UNAUTHENTICATED, requestId: 0f9c2d0a-2222-4b6e-9a0b-6f3c1b2d7a10 }
+    Forbidden:
+      description: Signed in but the role is not allowed
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Not allowed, status: 403, code: FORBIDDEN, requestId: 0f9c2d0a-3333-4b6e-9a0b-6f3c1b2d7a10 }
+    NotFound:
+      description: No such resource
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Not found, status: 404, code: NOT_FOUND, requestId: 0f9c2d0a-4444-4b6e-9a0b-6f3c1b2d7a10 }
+    SlotConflict:
+      description: The slot was taken first (or the new slot for a reschedule was taken)
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            slotTaken:
+              summary: Someone else booked it a moment earlier
+              value:
+                title: That slot has just been taken
+                status: 409
+                code: SLOT_TAKEN
+                detail: Another patient booked this slot a moment before you. Please choose another time.
+                requestId: 0f9c2d0a-5555-4b6e-9a0b-6f3c1b2d7a10
+                suggestedSlots:
+                  - { id: 7c1a4f0e-0000-4a11-8d2e-000000000001, startsAt: '2026-10-26T09:20:00+01:00', endsAt: '2026-10-26T09:40:00+01:00', available: true }
+    InvalidTransition:
+      description: Status change not allowed from the current status, or the screen was stale
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          examples:
+            invalidTransition:
+              value: { title: Not allowed from this status, status: 409, code: INVALID_TRANSITION, detail: A completed visit cannot be cancelled., requestId: 0f9c2d0a-6666-4b6e-9a0b-6f3c1b2d7a10 }
+    ClinicClosed:
+      description: The clinic is closed that day
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Clinic closed, status: 409, code: CLINIC_CLOSED, requestId: 0f9c2d0a-7777-4b6e-9a0b-6f3c1b2d7a10 }
+    RateLimited:
+      description: Too many requests from this client. Retry after the number of seconds in Retry-After.
+      headers:
+        X-Request-Id: { $ref: '#/components/headers/XRequestId' }
+        Retry-After: { schema: { type: integer }, description: Seconds }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Slow down, status: 429, code: RATE_LIMITED, requestId: 0f9c2d0a-8888-4b6e-9a0b-6f3c1b2d7a10 }
+    ServerError:
+      description: Unexpected failure. Safe to retry reads. For writes retry with the SAME Idempotency-Key.
+      headers: { X-Request-Id: { $ref: '#/components/headers/XRequestId' } }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+          example: { title: Something went wrong, status: 500, code: INTERNAL_ERROR, requestId: 0f9c2d0a-9999-4b6e-9a0b-6f3c1b2d7a10 }
