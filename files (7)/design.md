@@ -97,7 +97,7 @@ Patients are **anonymous**; they hold a reference (and a manage token for change
 
 **Enforced in the service** (Spring Security method rules + the port layer ignores nothing). The mandatory authorisation test: a RECEPTIONIST token calls `POST /demo/reset` directly and must get 403; the test must fail when the `@PreAuthorize("hasRole('ADMIN')")` is removed. A second assertion: anonymous call to `PUT /appointments/{id}/status` returns 401.
 
-**Patient privacy.** `PatientView` has no `contact` field and no other patient's data by construction. A test serialises a `PatientAppointment` and asserts the JSON contains no seeded contact string and no other seeded patient name.
+**Patient privacy.** `com.clinicflow.domain.port.PatientView` has no `contact` field and no other patient's data by construction. A test serialises a `PatientAppointment` and asserts the JSON contains no seeded contact string and no other seeded patient name.
 
 **Reference and tokens.** Reference `CF-XXXX-XXXX`, 8 chars from Crockford base32 (~40 bits), random, unique-indexed. Manage token: 22 random URL-safe chars, shown once, only its SHA-256 stored. Public lookup endpoints are rate limited (stops guessing).
 
@@ -112,68 +112,68 @@ Package `com.clinicflow.domain.port`. Everything is plain Java records and inter
 ```java
 public enum Status { BOOKED, WAITING, IN_CONSULTATION, COMPLETED, CANCELLED }
 public enum ActorRole { PATIENT, RECEPTIONIST, ADMIN, SYSTEM }
-public record Actor(String label, ActorRole role, String requestId) {}   // Henry builds it from the JWT / request
+public record com.clinicflow.domain.port.Actor(String label, ActorRole role, String requestId) {}   // Henry builds it from the JWT / request
 
 // ---------- commands (Henry -> Deji)
-public record BookCommand(String patientName, String contact, String visitTypeCode, UUID slotId, Actor actor) {}
-public record WalkInCommand(String patientName, String contact, String visitTypeCode, boolean aheadOfQueue, Actor actor) {}
-public record AppointmentFilter(LocalDate date, Set<Status> statuses, String q, int page, int size) {}
+public record com.clinicflow.domain.port.BookCommand(String patientName, String contact, String visitTypeCode, UUID slotId, com.clinicflow.domain.port.Actor actor) {}
+public record com.clinicflow.domain.port.WalkInCommand(String patientName, String contact, String visitTypeCode, boolean aheadOfQueue, com.clinicflow.domain.port.Actor actor) {}
+public record com.clinicflow.domain.port.AppointmentFilter(LocalDate date, Set<Status> statuses, String q, int page, int size) {}
 
 // ---------- views (Deji -> Henry; Henry maps to DTOs, never exposes entities)
-public record VisitTypeView(int id, String code, String label, int durationMinutes) {}
-public record SlotView(UUID id, Instant startsAt, Instant endsAt, boolean available) {}
-public record EstimateView(int minutes, String basis) {}
-public record PatientView(String reference, String patientName, VisitTypeView visitType, Instant slotStart, Instant slotEnd,
-                          Status status, Integer queuePosition, Integer peopleAhead, EstimateView estimate,
+public record com.clinicflow.domain.port.VisitTypeView(int id, String code, String label, int durationMinutes) {}
+public record com.clinicflow.domain.port.SlotView(UUID id, Instant startsAt, Instant endsAt, boolean available) {}
+public record com.clinicflow.domain.port.EstimateView(int minutes, String basis) {}
+public record com.clinicflow.domain.port.PatientView(String reference, String patientName, com.clinicflow.domain.port.VisitTypeView visitType, Instant slotStart, Instant slotEnd,
+                          Status status, Integer queuePosition, Integer peopleAhead, com.clinicflow.domain.port.EstimateView estimate,
                           boolean canCancel, boolean canReschedule, Instant updatedAt) {}
-public record StaffView(UUID id, String reference, String patientName, String contact, VisitTypeView visitType,
+public record com.clinicflow.domain.port.StaffView(UUID id, String reference, String patientName, String contact, com.clinicflow.domain.port.VisitTypeView visitType,
                         Instant slotStart, Instant slotEnd, boolean walkIn, Status status, Integer queuePosition,
                         Instant checkedInAt, Instant consultationStartedAt, Instant completedAt, Instant cancelledAt,
                         String cancelReason, int version, Instant createdAt, Instant updatedAt) {}
-public record BookingResult(PatientView appointment, String manageToken) {}
-public record QueueSnapshot(LocalDate date, List<StaffView> inConsultation, List<StaffView> waiting, Instant generatedAt) {}
-public record DashboardView(LocalDate date, int total, int booked, int waiting, int inConsultation, int completed,
+public record com.clinicflow.domain.port.BookingResult(com.clinicflow.domain.port.PatientView appointment, String manageToken) {}
+public record com.clinicflow.domain.port.QueueSnapshot(LocalDate date, List<com.clinicflow.domain.port.StaffView> inConsultation, List<com.clinicflow.domain.port.StaffView> waiting, Instant generatedAt) {}
+public record com.clinicflow.domain.port.DashboardView(LocalDate date, int total, int booked, int waiting, int inConsultation, int completed,
                             int cancelled, int walkIns, Instant generatedAt) {}
-public record ActivityView(long id, UUID appointmentId, String reference, String eventType, Status from, Status to,
+public record com.clinicflow.domain.port.ActivityView(long id, UUID appointmentId, String reference, String eventType, Status from, Status to,
                            String actor, ActorRole actorRole, Instant occurredAt) {}
-public record PageResult<T>(List<T> items, int page, int size, long totalItems) {}
+public record com.clinicflow.domain.port.PageResult<T>(List<T> items, int page, int size, long totalItems) {}
 
 // ---------- ports
-public interface SlotPort        { List<VisitTypeView> visitTypes(); List<SlotView> slotsFor(LocalDate date); }
+public interface SlotPort        { List<com.clinicflow.domain.port.VisitTypeView> visitTypes(); List<com.clinicflow.domain.port.SlotView> slotsFor(LocalDate date); }
 public interface BookingPort     {
-  BookingResult book(BookCommand c);
-  PatientView   cancelByPatient(String reference, String manageToken, String reason);
-  PatientView   rescheduleByPatient(String reference, String manageToken, UUID newSlotId);
-  StaffView     rescheduleByStaff(UUID id, UUID newSlotId, Actor actor);
+  com.clinicflow.domain.port.BookingResult book(com.clinicflow.domain.port.BookCommand c);
+  com.clinicflow.domain.port.PatientView   cancelByPatient(String reference, String manageToken, String reason);
+  com.clinicflow.domain.port.PatientView   rescheduleByPatient(String reference, String manageToken, UUID newSlotId);
+  com.clinicflow.domain.port.StaffView     rescheduleByStaff(UUID id, UUID newSlotId, com.clinicflow.domain.port.Actor actor);
 }
 public interface QueuePort       {
-  StaffView     changeStatus(UUID id, Status expected, Status target, String reason, Actor actor);
-  StaffView     admitWalkIn(WalkInCommand c);
-  QueueSnapshot queue(LocalDate date);
+  com.clinicflow.domain.port.StaffView     changeStatus(UUID id, Status expected, Status target, String reason, com.clinicflow.domain.port.Actor actor);
+  com.clinicflow.domain.port.StaffView     admitWalkIn(com.clinicflow.domain.port.WalkInCommand c);
+  com.clinicflow.domain.port.QueueSnapshot queue(LocalDate date);
 }
 public interface AppointmentQueryPort {
-  PageResult<StaffView> search(AppointmentFilter f);
-  StaffView get(UUID id);
-  PatientView lookup(String reference);                 // derived position + estimate
-  List<ActivityView> activity(UUID id);
-  List<ActivityView> recent(int limit);
+  com.clinicflow.domain.port.PageResult<com.clinicflow.domain.port.StaffView> search(com.clinicflow.domain.port.AppointmentFilter f);
+  com.clinicflow.domain.port.StaffView get(UUID id);
+  com.clinicflow.domain.port.PatientView lookup(String reference);                 // derived position + estimate
+  List<com.clinicflow.domain.port.ActivityView> activity(UUID id);
+  List<com.clinicflow.domain.port.ActivityView> recent(int limit);
 }
-public interface DashboardPort   { DashboardView dashboard(LocalDate date); }
+public interface DashboardPort   { com.clinicflow.domain.port.DashboardView dashboard(LocalDate date); }
 public interface DemoPort        { void resetDay(LocalDate date); }
 
 // ---------- event (Deji publishes AFTER COMMIT; Henry's SSE broadcaster listens)
-public record QueueChanged(LocalDate clinicDate, Set<String> references) {}
+public record com.clinicflow.domain.port.QueueChanged(LocalDate clinicDate, Set<String> references) {}
 ```
 
 ### Domain exceptions → HTTP (Henry owns this table; Deji only throws)
 
 | Exception (in `domain.port`) | HTTP | `code` | Notes |
 |---|---|---|---|
-| `SlotTakenException(List<SlotView> suggestions)` | 409 | `SLOT_TAKEN` | Becomes `suggestedSlots` |
+| `SlotTakenException(List<com.clinicflow.domain.port.SlotView> suggestions)` | 409 | `SLOT_TAKEN` | Becomes `suggestedSlots` |
 | `SlotInPastException` | 422 | `SLOT_IN_PAST` | |
 | `UnknownVisitTypeException`, bean validation failures | 422 | `VALIDATION_FAILED` | `fieldErrors` |
-| `InvalidTransitionException(StaffView current)` | 409 | `INVALID_TRANSITION` | `current` filled |
-| `StaleStateException(StaffView current)` | 409 | `STALE_STATE` | `expectedStatus` didn't match |
+| `InvalidTransitionException(com.clinicflow.domain.port.StaffView current)` | 409 | `INVALID_TRANSITION` | `current` filled |
+| `StaleStateException(com.clinicflow.domain.port.StaffView current)` | 409 | `STALE_STATE` | `expectedStatus` didn't match |
 | `NotFoundException` | 404 | `NOT_FOUND` | Also for a wrong reference |
 | `BadManageTokenException` | 401 | `UNAUTHENTICATED` | |
 | `ClinicClosedException` | 409 | `CLINIC_CLOSED` | |
@@ -347,13 +347,13 @@ sequenceDiagram
   UI->>API: GET /patient/appointments/{ref}/events (EventSource)
   API-->>UI: event appointment (current state)
   Note over D: Reception cancels the patient ahead
-  D->>D: commit, publish QueueChanged(date, refs)
+  D->>D: commit, publish com.clinicflow.domain.port.QueueChanged(date, refs)
   API->>D: AppointmentQueryPort.lookup(ref) for each connected ref
   API-->>UI: event appointment (position 3 -> 2)
   Note over UI,API: Connection drops: UI shows Reconnecting and polls GET every 10 s
 ```
 
-- Henry's `SseBroadcaster` keeps `reference → emitters` in memory and listens for `QueueChanged` **after commit**.
+- Henry's `SseBroadcaster` keeps `reference → emitters` in memory and listens for `com.clinicflow.domain.port.QueueChanged` **after commit**.
 - Single service instance, so in-memory registry is enough (declared limitation: scaling to two instances would need a shared bus; a free host sleeping/restarting drops connections, which the client handles by reconnecting).
 - Keep-alive comment every ~25 s so proxies don't close the stream.
 
@@ -407,7 +407,7 @@ Every business rule has a test that **fails when the rule is removed**. Integrat
 | Patient view never exposes other patients | `PatientViewPrivacyIT` | Henry | adding `contact` to the DTO |
 | Estimate is labelled with its basis | `EstimateTest` | Deji | returning minutes without `basis` |
 | Same submission twice records once | `IdempotencyIT` (same key twice, concurrently, and sequentially) | Henry | removing the key row |
-| Live position updates without reload | `SseIT` | Henry | not publishing `QueueChanged` |
+| Live position updates without reload | `SseIT` | Henry | not publishing `com.clinicflow.domain.port.QueueChanged` |
 | Service still satisfies the contract | Schemathesis in pipeline | Henry | any divergence |
 | Fictional data only | Seed review checklist (all names and contacts invented, labelled in the UI and README). A policy, not an automated test. | Deji | n/a |
 
