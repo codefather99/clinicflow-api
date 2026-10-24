@@ -1,6 +1,5 @@
 package com.clinicflow.fake;
 
-import com.clinicflow.domain.port.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.ApplicationEventPublisher;
@@ -13,6 +12,8 @@ import java.util.Set;
 
 /**
  * Active while clinicflow.ports=fake (the default until handshake H2).
+ * InMemoryClinic implements every port, so ONE bean is enough: Spring injects it for SlotPort,
+ * BookingPort, QueuePort, AppointmentQueryPort, DashboardPort and DemoPort alike.
  * When Deji's real implementations exist they are annotated
  * @ConditionalOnProperty(name = "clinicflow.ports", havingValue = "real") and this class steps aside.
  */
@@ -27,11 +28,4 @@ public class FakePortsConfig {
         clinic.resetDay(clinic.today());
         return clinic;
     }
-
-    @Bean SlotPort slotPort(InMemoryClinic c) { return c; }
-    @Bean BookingPort bookingPort(InMemoryClinic c) { return c; }
-    @Bean QueuePort queuePort(InMemoryClinic c) { return c; }
-    @Bean AppointmentQueryPort appointmentQueryPort(InMemoryClinic c) { return c; }
-    @Bean DashboardPort dashboardPort(InMemoryClinic c) { return c; }
-    @Bean DemoPort demoPort(InMemoryClinic c) { return c; }
 }
