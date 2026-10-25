@@ -50,7 +50,7 @@ Format required by the brief: **context, decision, alternatives rejected, cost a
 
 **Context.** The patient must see their position change without reloading. Free hosts and free time limit what we can run.
 
-**Decision.** `GET /patient/appointments/{reference}/events` streams the patient's own state with `text/event-stream`. The domain publishes `QueueChanged` after commit; the SSE broadcaster re-reads each connected reference. The client falls back to polling every 10 seconds and shows "Reconnecting…" while disconnected.
+**Decision.** `GET /patient/appointments/{reference}/events` streams the patient's own state with `text/event-stream`. The domain publishes `com.clinicflow.domain.port.QueueChanged` after commit; the SSE broadcaster re-reads each connected reference. The client falls back to polling every 10 seconds and shows "Reconnecting…" while disconnected.
 
 **Rejected.**
 - *WebSockets:* two-way is not needed; more moving parts on a free host.

@@ -52,11 +52,11 @@ Mapped to the brief's two halves: **Henry = Engineer B**, **Deji = Engineer A**.
 
 | Question | Answer |
 |---|---|
-| Who writes `appointment_activity` rows? | Deji. They are part of the rule (every status change appends one). The `actor` label and `requestId` are passed *in* by Henry via the `Actor` and command records. |
+| Who writes `appointment_activity` rows? | Deji. They are part of the rule (every status change appends one). The `actor` label and `requestId` are passed *in* by Henry via the `com.clinicflow.domain.port.Actor` and command records. |
 | Who owns the concurrency test? | Deji writes the test logic (it is a rule test). Henry wires it into the pipeline and points it at the deployed URL. |
-| Who generates the JWT and the roles? | Henry. Deji's code only receives an `Actor(label, role)` and never sees a token. |
+| Who generates the JWT and the roles? | Henry. Deji's code only receives an `com.clinicflow.domain.port.Actor(label, role)` and never sees a token. |
 | Who decides the HTTP status for a rule failure? | Henry, via the exception table in `design.md` §4. Deji just throws the right exception. |
-| Who calls `queue changed` to the SSE stream? | Deji publishes a `QueueChanged` Spring event after commit. Henry subscribes. Neither calls the other directly. |
+| Who calls `queue changed` to the SSE stream? | Deji publishes a `com.clinicflow.domain.port.QueueChanged` Spring event after commit. Henry subscribes. Neither calls the other directly. |
 
 ---
 
@@ -121,7 +121,7 @@ If H2 slips past Friday night: Deji keeps working, Henry keeps the fake ports on
 |---|---|
 | Create repos, push this folder. Spring Boot skeleton (Java 21, Maven, Web, Validation, Security, Flyway, JDBC/JPA, Actuator, springdoc not needed: contract-first). | Copy `V1__clinicflow_core.sql` into `db/migration`; apply to local Postgres (Docker). Read it end to end; challenge anything you disagree with *tonight*. |
 | Send `openapi.yaml` + the "what Ehimare needs" list (§7) to Ehimare. Start Prism mock. | Write the **client questions** answers/assumptions into `intent.md` §6 with Henry. |
-| Merge `domain.port` interfaces + exceptions + `Actor` (copy from `design.md` §4). | Review the ports. Anything awkward? Change them *now*, while it's free. |
+| Merge `domain.port` interfaces + exceptions + `com.clinicflow.domain.port.Actor` (copy from `design.md` §4). | Review the ports. Anything awkward? Change them *now*, while it's free. |
 | Skeleton CI: build + test + ArchUnit on every push. | Start `SlotPort`/`BookingPort` real implementation with Testcontainers. |
 
 ### Friday 23
@@ -130,14 +130,14 @@ If H2 slips past Friday night: Deji keeps working, Henry keeps the fake ports on
 |---|---|
 | Fake ports (in-memory) so controllers work today. | `BookingPort.book` with the unique-index protection; `SlotPort.slotsFor`; reference generator. |
 | JWT login, roles, `GlobalExceptionHandler`, `RequestIdFilter`, idempotency wrapper. | `QueuePort.changeStatus` (check-in, start, complete, cancel), `admitWalkIn`, queue lock. |
-| Render + Neon created, deploy `/api/v1/meta` through the pipeline (empty but live). | Estimate calculation, `AppointmentQueryPort`, `PatientView` derivation. |
+| Render + Neon created, deploy `/api/v1/meta` through the pipeline (empty but live). | Estimate calculation, `AppointmentQueryPort`, `com.clinicflow.domain.port.PatientView` derivation. |
 | **H2** at midday, **H3** in the evening. | |
 
 ### Saturday 24
 
 | Henry | Deji |
 |---|---|
-| SSE endpoint + `QueueChanged` listener. Rate limiting on public endpoints. | Concurrency tests: two bookings same slot; two check-ins same instant; cancel mid-queue renumbers; reschedule race. |
+| SSE endpoint + `com.clinicflow.domain.port.QueueChanged` listener. Rate limiting on public endpoints. | Concurrency tests: two bookings same slot; two check-ins same instant; cancel mid-queue renumbers; reschedule race. |
 | Wire the concurrency test to run **against the deployed URL** after deploy (**H4**). | Dashboard queries; `appointment_activity` writes verified. |
 | Authorisation test and patient-privacy test (each must fail with the check removed). | Seed data runner v1 (enough for Monday: a clean day with a handful of each status). |
 
