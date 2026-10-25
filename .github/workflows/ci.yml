@@ -15,5 +15,27 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Build, test (includes the ArchUnit seam check)
+      - name: Build and test (includes the ArchUnit seam check)
         run: ./mvnw -B verify
+
+  deploy:
+    needs: build-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        run: curl --fail --silent --show-error -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the deployed service to answer
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "${{ vars.API_URL }}/api/v1/meta" || true)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 15
+          done
+          echo "Service did not become healthy in time"; exit 1
