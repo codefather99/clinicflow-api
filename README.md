@@ -8,7 +8,7 @@ Appointment booking and live queue tracking for a small clinic. This is the back
 |---|---|
 | **Live API** | https://clinicflow-api-ytgg.onrender.com (free tier: the first request after idle can take up to a minute) |
 | **Health check** | `GET /api/v1/meta` |
-| **Web app** | `clinicflow-web` repository (Ehimare J. Okosun) — *[add link]* |
+| **Web app** | `clinicflow-web` repository (Ehimare J. Okosun) —(https://clinicflow-web.qocent.app) |
 | **API contract** | [`openapi/openapi.yaml`](openapi/openapi.yaml) |
 
 ---
